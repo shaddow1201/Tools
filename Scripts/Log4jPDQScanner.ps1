@@ -40,6 +40,7 @@ $hashTable
  param (
     [parameter(Mandatory=$false)][string]$Test_MachineName = "",
     [Parameter(Mandatory=$false)]$LocationsToScan_Array = @(),
+    [Parameter(Mandatory=$false)][string]$DriveExclusions = "J:\",
     [Parameter(Mandatory=$false)][string]$FolderExclusions = "",
     [Parameter(Mandatory=$false)][string]$LocalMachine = "Y",
     [Parameter(Mandatory=$false)][string]$VulnerabilityName = "Log4j_Vulnerability",
@@ -51,7 +52,7 @@ $hashTable
     [Parameter(Mandatory=$false)][string]$LogDirectory = "D:\Tools\Scripts\"
 
  )
-function Catch-WebFailure {
+function Get-WebFailure {
     $global:helpme = $body
     $global:helpmoref = $moref
     $global:result = $_.Exception.Response.GetResponseStream()
@@ -83,8 +84,19 @@ function Set-LogFileName (){
 function Show-DrivesToBeScanned(){
     if ($LocationsToScan_Array.Count -eq 0){
         $Drives = Get-PSDrive -PSProvider 'FileSystem'
-        Write-Message "Local Drives Scan Results:` $($Drives.Count)" 0
-    } else {
+        Write-Message "$($Drives.Root)"
+        # Exclusion Array
+        $DriveExclusionArray = $DriveExclusions.Split(",")
+        foreach($ExcludedDriveLetter in $DriveExclusionArray){
+          write-message "Remove Drive: $($ExcludedDriveLetter)" 0
+          foreach ($Drive in $Drives){
+            if ($Drive.Root -eq $($ExcludedDriveLetter)){
+              write-message "$($Drive.Root) to Be Excluded." 0
+              $Drives = $Drives | ? { $Drives.Root -ne $ExcludedDriveLetter }
+            }
+          }
+        }
+   } else {
         $Drives = $LocationsToScan_Array
         Write-Message "Local Drives Requested: $($LocationsToScan_Array.Count)" 0
     }
@@ -125,7 +137,7 @@ function Get-VulnerabilityDetails (){
                     $VulnerableDetails = -split $(Invoke-WebRequest $($VulnerableIdentifierLocation) -UseBasicParsing).content | Where-Object {$_.length -eq 64} -ErrorAction Continue 
                 } catch {
                     $VulnerableDetails = ""
-                    Catch-WebFailure
+                    Get-WebFailure
                     Write-Message "Web Failure Detected, exiting program." 0
                     exit
                 }
@@ -143,7 +155,7 @@ function Get-VulnerabilityDetails (){
     }
     return $VulnerableDetails
 }
-function Scan-DrivesForVulnerabilities (){
+function Get-DriveVulnerabilities (){
     foreach($Drive in $SearchDriveArray) {
       $localMessage = "Scanning: {0}   Location: {1}" -f $Drive.Name, $Drive.Root
       Write-Message "$($Drive.Root)$($ScanPattern)" 0
@@ -218,7 +230,6 @@ Clear-Host
 # 1. Get variable for scan locations.
 Write-Message "The Scanner will look at the following locations:" 0
 $SearchDriveArray = Get-SystemConditions
-
 # 2.SetLogFileName
 $LogFile = Set-LogFileName
 
@@ -229,7 +240,7 @@ $VulnerableDetails = Get-VulnerabilityDetails
 # 4. Use Drive list passed in and then process scan list in loop manner.
 #
 # TODO: file directories exclusions to be added.
-$result = Scan-DrivesForVulnerabilities
+$result = Get-DriveVulnerabilities
 #Return FileLocation and hash for each vulnerable result
 
 # 5. Detail out Results.
