@@ -33,24 +33,23 @@
 #>
 [CmdletBinding()]
 param (
-  [string]$Test_MachineName = '',
-  [array] $LocationsToScan_Array = @(),
-  [array] $DriveExclusions = @('I:\','J:\'),
+  [string]$ScanMachine = '',
+  [array] $NetworkScanLocations = @(),
+  [array] $DriveExclusions = @('C:\','D:\','E:\','F:\','G:\','I:\','I:\','J:\','Z:\'),
   [array] $FolderExclusions = @('C:\Program Files\Windows Defender Advanced Threat Protection\Classification\Configuration\','C:\Windows\CSC\v2.0.6\','C:\Windows\System32\LogFiles\WMI\RtBackup\'),
-  [string]$VulnerabilityName = 'Log4j_Vulnerability',
-  [string]$VulnerabilityDetectionStyle = 'sha256sums',
-  [string]$VulnerableIdentifierLocation = 'https://github.com/mubix/CVE-2021-44228-Log4Shell-Hashes/raw/main/sha256sums.txt',
-  [string]$ScanPattern = "log4j*.jar",
-  [boolean]$RecursiveDriveScan = $true,
+  [string]$VulnerabilityName = 'CVE-2021-44228',
+  [string]$VulnerabilityDetectionStyle = 'SHA256',
+  [string]$VulnerabilityDefinitionLocation = 'https://github.com/mubix/CVE-2021-44228-Log4Shell-Hashes/raw/main/sha256sums.txt',
+  [string]$VulnerabilityFilePattern = "log4j*.jar",
+  [boolean]$RecursiveScans = $true,
   [string]$MessagingLevel = '4',
-  [string]$LogResultsToFile = 'Y',
   [string]$LogDirectory = 'D:\Tools\Scripts\'
 )
 #region Function Area - System Setup
-[string]$LogFileString="$($LogDirectory)$($VulnerabilityName).txt"
+[string]$LogFileString="$($script:LogDirectory)$($script:VulnerabilityName).txt"
 $Tab = [char]9 
+#.SYNOPSIS TimeStamp usable for files
 function Get-TimeStampNonFilename {
-  #.SYNOPSIS TimeStamp usable for files
 
   return '[{0:MM/dd/yy} {0:HH:mm:ss}]' -f (Get-Date)
 }
@@ -64,14 +63,14 @@ function Write-Message {
   #.SYNOPSIS Messaging and Logging, with configurable level notations.
   [CmdletBinding()]
   param (
-    [string]$Message='', 
+    [Parameter(Mandatory=$true)][string]$Message, 
     [int]$MessageLevel=0,
     [int]$Severity=1
   )
   $SeverityMessage = ''
   switch($Severity){
-      2 { $SeverityMessage = 'WARNING: ' }
-      3 { $SeverityMessage = 'ERROR: ' }
+    2 { $SeverityMessage = 'WARNING: ' }
+    3 { $SeverityMessage = 'ERROR: ' }
   }
   $Tab = [char]9
   if($script:MessagingLevel -ge $MessageLevel){
@@ -84,10 +83,7 @@ function Write-Message {
       4 {"$Tab$Tab$Tab"} # more? usually just more detail.
     }
     $BuildMessage = $level + $Message
-    if($($global:LogResultsToFile) -eq 'Y'){
-      # placeholder for file output.
-      Write-Output "$(Get-TimeStampNonFilename)$Tab$($BuildMessage)" | Out-file "$($global:LogFileString)" -append
-    }
+    Write-Output "$(Get-TimeStampNonFilename)$Tab$($SeverityMessage)$Tab$($BuildMessage)" | Out-file "$($global:LogFileString)" -append
     switch($Severity){
       1 {
         write-Host "$($BuildMessage)"
@@ -101,21 +97,21 @@ function Write-Message {
     }
   }
 }
-Write-Message "#########################################################################" 1 1
-Write-Message "LogFile will be located at: $($LogFileString)" 1 1
-function Set-LogFileName{
-  #.SYNOPSIS Set and Return the LogFileName
-  [string]$LogDirectory=$script:LogDirectory, 
-  [string]$VulnerabilityName=$script:VulnerabilityName
-  # .Set-LogFileName in Directory/VulnerabilityName.txt format
-  Write-Message "LogFile Directory and Name set: $($LogDirectory)$($VulnerabilityName).txt" 1 1
-}
+Write-Message "#########################################################################" 1
+Write-Message " " 1 
+Write-Message "LogFile: $($LogFileString)" 1 
 function Show-LocalDrivesToBeScanned {
   #.SYNOPSIS Resolve Local Drive Requests
+  param
+  (
+    [string]$ScanMachine='',
+    [array]$DriveExclusions=@(),
+    [array]$NetworkScanLocations=@()
+  )
   $Tab = [char]9
   $retDriveArray =@()
   # if nothing passed in look at local system and apply exclusions
-  if ($script:LocationsToScan_Array.Count -eq 0){
+  if ($NetworkScanLocations.Count -eq 0){
     $Drives = Get-PSDrive -PSProvider 'FileSystem'
     # Exclusion Array matched against drives
     foreach ($Drive in $Drives){
@@ -124,7 +120,7 @@ function Show-LocalDrivesToBeScanned {
       }
     }
   } else {
-    $Drives = $LocationsToScan_Array
+    $Drives = $ScanMachine
     foreach ($Drive in $Drives){
       if (!($DriveExclusions -contains $Drive.Root) -and !($retDriveArray -contains $Drive.Root)){
         $retDriveArray += $Drive
@@ -135,11 +131,17 @@ function Show-LocalDrivesToBeScanned {
 }
 function Get-SystemConditions {
   #.SYNOPSIS Determine Script Posture (Local/Network) and display resources to scan.
+  param
+  (
+    [string]$ScanMachine='',
+    [array]$DriveExclusions=@(),
+    [array]$NetworkScanLocations=@()
+  )
   $Tab = [char]9
   $retDriveArray =@()
-  if ($script:Test_MachineName.Length -gt 0){
-    if ($script:Test_MachineName -ne "$($env:COMPUTERNAME)"){
-      Write-Message "Scan Host: $($script:Test_MachineName)" 1 1
+  if ($ScanMachine.Length -gt 0){
+    if ($ScanMachine -ne "$($env:COMPUTERNAME)"){
+      Write-Message "Scan Host: $($ScanMachine)" 1
       <#
           To check the drives on a remote computer, add the ComputerName parameter.
           For example, to list all physical drives and their free space on a machine called: ContosoWS1
@@ -149,58 +151,64 @@ function Get-SystemConditions {
       $retDriveArray = ''
       exit
     } else {
-      Write-Message "Scan Host:$Tab $($env:COMPUTERNAME)" 1 1
-      $retDriveArray = Show-LocalDrivesToBeScanned
+      Write-Message "Scan Host:$Tab $($env:COMPUTERNAME)" 1 
+      $retDriveArray = Show-LocalDrivesToBeScanned $ScanMachine $DriveExclusions $NetworkScanLocations
     }
   } else {
-    Write-Message "Scan Host:$Tab $($env:COMPUTERNAME)" 1 1
-    $retDriveArray = Show-LocalDrivesToBeScanned
+    Write-Message "Scan Host:$Tab $($env:COMPUTERNAME)" 1
+    $retDriveArray = Show-LocalDrivesToBeScanned $ScanMachine $DriveExclusions $NetworkScanLocations
   }
-  Write-Message "Scan Drives:$Tab $($retDriveArray)" 1 1
+  Write-Message "Scan Drives:$Tab $($retDriveArray)" 1
   return $retDriveArray
 }
 #endregion
 #region Start and setup
 # .Welcome_Message
-Write-Message "#########################################################################" 0 1
-Write-Message '  ' 0 1
-Write-Message 'The Zero Day Vulnerability Scanner' 0 1
-Write-Message 'When all you have is a jackknife, ' 0 1
-Write-Message 'and a description of a vulnerability.' 0 1
-Write-Message "#########################################################################" 0 1
+Write-Message "#########################################################################"
+Write-Message '  '
+Write-Message 'The Zero Day Vulnerability Scanner'
+Write-Message 'When all you have is a jackknife, '
+Write-Message 'and a description of a vulnerability.'
+Write-Message "#########################################################################"
 # Reason: Need based to assess potential threats, and even maybe 
 # a hack on the fly. I will extend some functionality 
 # to do so hash based SQL Server data checking. 
 #
-Write-Message 'Computer and Locations to be scanned' 0 1
-Write-Message "#########################################################################" 0 1
+Write-Message 'Computer and Locations to be scanned'
+Write-Message "#########################################################################"
 # .DrivesAndLocations
 
-$SearchDriveArray = Get-SystemConditions
-Write-Message ' ' 0 1
+$SearchDriveArray = Get-SystemConditions $ScanMachine $DriveExclusions $NetworkScanLocations
+Write-Message ' ' 
 #  a) Volume Exclusions - works and is shown.
 #  b) Directory Set Exclusion - a WIP
-Write-Message "Drive Exclusions: $($DriveExclusions)" 0 1
-Write-Message ' ' 0 1
-Write-Message "#########################################################################" 0 1
+Write-Message "Drive Exclusions: $($DriveExclusions)"
+Write-Message ' ' 
+Write-Message "#########################################################################"
 #endregion
 #region Function Area - Processing Functions
 function Get-VulnerabilityDetails {
   #.SYNOPSIS Retrieve Vulnerability Resources
+  param
+  (
+    [Parameter(Mandatory=$true)][string]$VulnerabilityDefinitionLocation,
+    [Parameter(Mandatory=$true)][string]$VulnerabilityDetectionStyle,
+    [Parameter(Mandatory=$true)][string]$VulnerabilityFilePattern
+  )
   $Tab = [char]9
-  write-message "Vulnerability Detail Location: $( $script:VulnerableIdentifierLocation)" 1 1
-  Write-Message ' ' 1 1
-  switch ($script:VulnerabilityDetectionStyle){
+  write-message "Vulnerability Detail Location: $( $VulnerabilityDefinitionLocation)" 1 
+  Write-Message ' ' 1
+  switch ($VulnerabilityDetectionStyle){
     # Handles the Log4J pattern
-    'sha256sums' { 
-      Write-Message "Vulnerability Type Identified:$Tab$Tab sha256sums" 1 1
-      if ($script:ScanPattern -eq 'log4j*.jar'){
-        Write-Message "Specific Vulnerability Identified:$Tab Log4j*.jar" 1 1
+    'SHA256' { 
+      Write-Message "HASH TYPE:$Tab SHA256" 1
+      if ($VulnerabilityFilePattern -eq 'log4j*.jar'){
+        Write-Message "Specific Vulnerability Identified:$Tab Log4j*.jar" 1
         try {
           # yanks out objects of 64 length
-          $VulnerableSums = -split $(Invoke-WebRequest $VulnerableIdentifierLocation -UseBasicParsing).content | Where-Object {$_.length -eq 64} -ErrorAction Continue 
+          $VulnerableHashes = -split $(Invoke-WebRequest $VulnerabilityDefinitionLocation -UseBasicParsing).content | Where-Object {$_.length -eq 64} -ErrorAction Continue 
         } catch {
-          $VulnerableSums = @()
+          $VulnerableHashes = @()
           Write-Message '###########################################################################' 0 3
           Write-Message " " 0 3
           Write-Message 'Web Failure Detected, exiting program.' 0 2
@@ -208,82 +216,97 @@ function Get-VulnerabilityDetails {
           Write-Message '###########################################################################' 0 3
           exit
         }
-        Write-Message "sha256sum File Signatures Acquired:$Tab $($VulnerableSums.Count)" 0 1
+        Write-Message "sha256sum File Signatures Acquired:$Tab $($VulnerableHashes.Count)" 0 1
       }
       # Add Additional Types here as we Identify
-      if ($VulnerableSums.Count -eq 0) {
+      if ($VulnerableHashes.Count -eq 0) {
         Write-Message '###########################################################################' 0 3
         Write-Message '## Vunerability Resources not detected, CRITICAL FAILURE, exiting program.' 0 3
         Write-Message '###########################################################################' 0 3
         exit
       }
-      $VulnerableObjects = $VulnerableSums
+      $VulnerableObjects = $VulnerableHashes
     }
     # Allows easy to add patterns/breakdowns of additional sources.
+    'SHA1' {
+      Write-Message "HASH TYPE:$Tab SHA1" 1
+    }
+    'SHA512' {
+      Write-Message "HASH TYPE:$Tab SHA512" 1
+    }
+    'SHA384' {
+      Write-Message "HASH TYPE:$Tab SHA384" 1
+    }
+    'MD5'  {
+      Write-Message "HASH TYPE:$Tab MD5" 1 
+    }
   }
   return $VulnerableObjects
 }
-function Get-SingleDriveVulnerability([string]$Drive){
-  #.SYNOPSIS Handle failures related to retreiving web resources.
-  write-message "DriveRoot: $($Drive)" 2 1
-  write-message "ScanPattern: $($script:ScanPattern)" 2 1
-  [boolean]$RecursiveDriveScan=$script:RecursiveDriveScan
-  [array]$FileErrorsArray = @()
-  if ($Test_MachineName.Length -eq 0){
-    ## Where-Object -FilterScript { !($FolderExclusions -contains (get-item $_).parent) }
-    $DriveSearchSums = get-childitem "$($Drive)$($script:ScanPattern)" -file -recurse:$RecursiveDriveScan -ErrorVariable $FileErrors | Select-Object FullName, @{Name = 'Hash'; Expression = {(Get-FileHash -Path $_.FullName).Hash}} 
-    $FileErrors = [String]$FileErrors
-    $FileErrorArray = [string]$FileErrors.Split(".").TrimStart()
-    foreach ($FileError in $FileErrorArray){
-      Write-Message "File Scan Error: $($FileError)" 0 2
-    } 
-    if ($FileErrorArray.Count -gt 0){
-      Write-Message "Total Errors: $($FileErrorArray.Count)" 2 2
-    } else {
-      Write-Message "No FileScan Errors." 2 1
-    }
-  } else {
-    # Network scan TODO/Test
-    cd c: #THIS IS THE CRITICAL LINE
-    Write-Message "$($Drive)$($script:ScanPattern) Scanned." 2 1
-    $DriveSearchSums = get-childitem "$($Drive)$($script:ScanPattern)" -file -recurse:$RecursiveDriveScan | Select-Object FullName, @{Name = 'Hash'; Expression = {(Get-FileHash -Path $_.FullName).Hash}}  
-  }
-  if ($DriveSearchSums.Count -gt 0){
-    write-message "Get Single Drive matching file Sums from $($Drive)$($script:ScanPattern) Found: $($DriveSearchSums.Count)" 2 2
-  } else {
-    write-message "Get Single Drive matching file Sums from $($Drive)$($script:ScanPattern) Found: $($DriveSearchSums.Count)" 2 1
-  }
-  return $DriveSearchSums
-}
 function Get-Vulnerabilities{
   #.SYNOPSIS Search Each Drive for issues.
-  [CmdletBinding()]
-  param (
-    [array]$SearchDriveArray 
+  param
+  (
+    [string]$ScanMachine='',
+    [Parameter(Mandatory=$true)][array]$SearchDriveArray,
+    [Parameter(Mandatory=$true)][bool]$RecursiveScans,
+    [Parameter(Mandatory=$true)][string]$VulnerabilityFilePattern
+    
   )
-  [string]$ScanPattern=$script:ScanPattern
-  $DriveSearchSums = @{}
-  $DriveSearchSumsFound = @()
+  function Get-SingleDriveVulnerability{
+    #.SYNOPSIS Handle failures related to retreiving web resources.
+    param
+    (
+      [string]$ScanMachine='',
+      [Parameter(Mandatory=$true)][string]$CurrDrive
+    )
+    write-message "DriveRoot: $($CurrDrive)" 2
+    write-message "ScanPattern: $($VulnerabilityFilePattern)" 2
+    $FileErrors = ""
+    if ($ScanMachine.Length -eq 0){
+      ## Where-Object -FilterScript { !($FolderExclusions -contains (get-item $_).parent) }
+      $FileErrors=''
+      $DriveFoundSums = get-childitem "$($CurrDrive)$($VulnerabilityFilePattern)" -file -recurse:$RecursiveScans -ErrorVariable +=$FileErrors | Select-Object FullName, @{Name = 'Hash'; Expression = {(Get-FileHash -Path $_.FullName).Hash}} 
+      #$FileErrors = [String]$FileErrors
+      #$FileErrorArray = [string]$FileErrors.Split(".").TrimStart()
+      #foreach ($FileError in $FileErrorArray){
+      #  Write-Message "File Scan Error: $($FileError)" 0 2
+      #} 
+      #if ($FileErrorArray.Count -gt 0){
+      #  Write-Message "Total Errors: $($FileErrorArray.Count)" 2 2
+      #} else {
+      #  Write-Message "No FileScan Errors." 2
+      #}
+    } else {
+      # Network scan TODO/Test
+      cd c: #THIS IS THE CRITICAL LINE
+      Write-Message "$($CurrDrive)$($VulnerabilityFilePattern) Scanned." 2 1
+      $DriveFoundSums = get-childitem "$($CurrDrive)$($VulnerabilityFilePattern)" -file -recurse:$RecursiveScans | Select-Object FullName, @{Name = 'Hash'; Expression = {(Get-FileHash -Path $_.FullName).Hash}}  
+    }
+    return $DriveFoundSums
+  }
   $resultHash = @{}    
   $totalVulnerabilitiesFound = 0
   $Tab = [char]9
   foreach($Drive in $SearchDriveArray) {
-    write-Message "Data Collection Starting: $($Drive.Root)$($script:ScanPattern)" 1 1
-    $DriveSearchSumsArray = Get-SingleDriveVulnerability "$($Drive.Root)"
-    Write-Message "Data Collection Complete: ($($Drive.Root)$($script:ScanPattern))" 1 1
-    if(-not($null -eq $DriveSearchSumsArray)){
-      $DriveSearchSumsFound += $DriveSearchSumsArray
-      Write-message "Vulnerable Objects Found $($DriveSearchSumsArray.Count)" 1 2
+    $DriveFoundHashes = @()
+    write-Message "Data Collection Starting: $($Drive.Root)$($VulnerabilityFilePattern)" 1
+    $DriveFoundHashes = Get-SingleDriveVulnerability $($ScanMachine) "$($Drive.Root)"
+    write-Message "$($DriveFoundHashes.Count)"
+    Write-Message "Data Collection Complete: ($($Drive.Root)$($VulnerabilityFilePattern))" 1
+    if(-not($null -eq $DriveFoundHashes)){
+      $DriveSearchSumsFound += $DriveFoundHashes
+      Write-message "Vulnerable Objects Found $($DriveFoundHashes.Count)" 1 2
       Write-Message "###############################################################################################################" 0 2
       Write-Message " " 0 2
-      Write-Message "ATTENTION: LOCATION CONTAINS NON-COMPROMISED HIGH-RISK FILES: $($DriveSearchSumsArray.Count) " 0 2
-      foreach($Entry in $DriveSearchSumsArray){
+      Write-Message "ATTENTION: LOCATION CONTAINS NON-COMPROMISED HIGH-RISK FILES: $($DriveFoundHashes.Count) " 0 2
+      foreach($Entry in $DriveFoundHashes){
         write-message "VULNERABLE FILE FOUND: $Tab $($Entry.FullName) $Tab$Tab$Tab -Hash: $($Entry.Hash)" 0 2
       }
-      Write-Message "ATTENTION: LOCATION CONTAINS NON-COMPROMISED HIGH-RISK FILES: $($DriveSearchSumsArray.Count)" 0 2
+      Write-Message "ATTENTION: LOCATION CONTAINS NON-COMPROMISED HIGH-RISK FILES: $($DriveFoundHashes.Count)" 0 2
       Write-Message " "        
       Write-Message "###############################################################################################################" 0 2
-      $VulnerableSums = Compare-Object -ReferenceObject $script:VulnerableObjects -DifferenceObject $DriveSearchSumsArray.Hash -ExcludeDifferent -IncludeEqual -ErrorAction Continue
+      $VulnerableSums = Compare-Object -ReferenceObject $VulnerableObjects -DifferenceObject $DriveFoundHashes.Hash -ExcludeDifferent -IncludeEqual -ErrorAction Continue
       if(-not($null -eq $VulnerableSums)){
         # if Vulnerable Files Found based File Pattern Search, note as vulnerable, 
         # and add to counter of vulnerabilities hashes against, to see if they are
@@ -291,30 +314,29 @@ function Get-Vulnerabilities{
         $checkCounter = 0
         # hashes should match beteen vulnerabilities and our systems, and count the same # 
         # or there is a possilbe breach.
-        foreach ($Entry in $DriveSearchSumsArray){
+        foreach ($Entry in $DriveFoundHashes){
           if($VulnerableSums.InputObject -contains $Entry.Hash){
             $resultHash.Add($Entry.FullName, $Entry.Hash)
             $checkCounter++
           }
         }
-        if ($checkCounter -ne $DriveSearchSumsArray.Count){
+        if ($checkCounter -ne $DriveFoundHashes.Count){
           Write-Message "###############################################################################################################" 0 3
           Write-Message "###############################################################################################################" 0 3
-          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveSearchSumsArray.Count) does not Match!!" 0 3
-          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveSearchSumsArray.Count) does not Match!!" 0 3
-          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveSearchSumsArray.Count) does not Match!!" 0 3
+          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveFoundHashes.Count) does not Match!!" 0 3
+          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveFoundHashes.Count) does not Match!!" 0 3
+          Write-Message "## WARNING POSSIBLE BREACH: Vulnerable Number of Vulnerable Hashes: $($DriveFoundHashes.Count) does not Match!!" 0 3
           Write-Message "## WARNING POSSIBLE BREACH: MISING HASH VALUES SUGGEST BREACH, AND LIKELY ACTIVITY." 0 3
           Write-Message "###############################################################################################################" 0 3
           Write-Message "###############################################################################################################" 0 3
         }
       }
-      $totalVulnerabilitiesFound = $totalVulnerabilitiesFound + $DriveSearchSumsArray.Count
-      write-Message "Total Vulnerabilities found during scan: $($totalVulnerabilitiesFound)" 1
+      $totalVulnerabilitiesFound = $totalVulnerabilitiesFound + $DriveFoundHashes.Count
     } else {
-      Write-Message "###########################################" 0 1
-      Write-Message " " 0 1
-      Write-Message "NO VULNERABLE FILES Detected on $($Drive.Root)$($script:ScanPattern) during scan." 0 1
-      Write-Message "###########################################" 0 1
+      Write-Message "###########################################"
+      Write-Message " "
+      Write-Message "NO VULNERABLE FILES Detected on $($Drive.Root)$($VulnerabilityFilePattern) during scan."
+      Write-Message "###########################################"
     }
   }
   return $DriveSearchSumsFound
@@ -322,21 +344,22 @@ function Get-Vulnerabilities{
 function Get-MitigationDetails{
   [CmdletBinding()]
   param (
-    [string]$VulnerabilityName
+    [Parameter(Mandatory=$true)][string]$VulnerabilityName
   )
   $Tab = [char]9
-  write-Message "Vulnerability Type: $($VulnerabilityName)" 0 1
+  write-Message "Vulnerability Type: $($VulnerabilityName)"
   switch ($VulnerabilityName){
-    "Log4j_Vulnerability" {
-      Write-Message "Vulnerability Notice:$Tab https://nvd.nist.gov/vuln/detail/CVE-2021-44228#match-7275032" 0 1
+    "CVE-2021-44228" {
+      Write-Message "Vulnerability Notice:$Tab https://nvd.nist.gov/vuln/detail/CVE-2021-44228#match-7275032"
+      Write-Message "Vulnerability Guidance:$Tab https://github.com/cisagov/log4j-affected-db"
       Write-Message " " 0 1
-      Write-Message "Detection/Mitigation Possible:$Tab Microsoft Defender Detection and More: https://www.microsoft.com/security/blog/2021/12/11/guidance-for-preventing-detecting-and-hunting-for-cve-2021-44228-log4j-2-exploitation/" 0 1
-      Write-Message "Mitigation Possible??:$Tab Detect and possilbe mitigation technique: https://www.deepwatch.com/blog/3-steps-to-detect-patch-log4j-log4shell-vulnerability/" 0 1
+      Write-Message "Detection/Mitigation Possible:$Tab Microsoft Defender Detection and More: https://www.microsoft.com/security/blog/2021/12/11/guidance-for-preventing-detecting-and-hunting-for-cve-2021-44228-log4j-2-exploitation/" 
+      Write-Message "Mitigation Possible??:$Tab Detect and possilbe mitigation technique: https://www.deepwatch.com/blog/3-steps-to-detect-patch-log4j-log4shell-vulnerability/"
     }
   }
 }
 #endregion
-#region Main Body
+#region Instructions/Detail
 ################################################
 ##
 ##  Begin Program. Log4J Testing
@@ -368,32 +391,42 @@ function Get-MitigationDetails{
 #  6. Add multi threading to allow multi computers and/or threats to be
 #     assessed at a time.
 #
+#endregion
+#region MainBody
 # .Vulnerability Retreival
-$VulnerableObjects = Get-VulnerabilityDetails
-Write-Message " " 0 1
-write-Message "Retrieved $($VulnerableObjects.Count) Vulnerable Object Definitions" 0 1
-Write-Message " " 0 1
-foreach($VulnerableObject in $VulnerableObjects){
-  Write-Message "$($VulnerableObject)" 0 1
+#   Details Retreival
+$VulnerableObjects = Get-VulnerabilityDetails $VulnerabilityDefinitionLocation $VulnerabilityDetectionStyle $VulnerabilityFilePattern
+Write-Message ' '
+write-Message "Retrieved $($VulnerableObjects.Count) Vulnerable Object Definitions"
+Write-Message ' '
+if ($VulnerableObjects.Count -gt 0){
+  foreach($VulnerableObject in $VulnerableObjects){
+    Write-Message "$($VulnerableObject)"
+  }
+} else {
+  Write-Message "An Error Occured, No Definitions were found.  Exiting Program" 0 3
 }
-
-Write-Message " " 0 1
+Write-Message ' '
 # 4. Use Drive list passed in and then process scan list in loop manner.
 # TODO: file directories exclusions to be added.
 # .Location Scans
-#Write-Message "Search Locations- $($SearchDriveArray)" 0 1
-$SearchedForVulnerabilityArray = Get-Vulnerabilities $SearchDriveArray 
-#Write-Message "Display File Vulnerabilties Found: $($SearchedForVulnerabilityArray.Count)" 0 1
-foreach($VulnerableHash in $SearchedForVulnerabilityArray){
-  Write-Message "FileName and Location:$Tab$($VulnerableHash.FullName)$Tab-File HashValue:$Tab$($VulnerableHash.Hash)" 0 2
-}
-Write-Message ' ' 0 1
-Write-Message "#########################################################################" 0 1
-Write-Message ' ' 0 1
+if ($SearchDriveArray.Count -gt 0){
+  Write-Message ' '
+  Write-Message "#########################################################################"
+  Write-Message ' '
+  $SearchedForVulnerabilityArray = Get-Vulnerabilities $ScanMachine $SearchDriveArray $RecursiveScans $VulnerabilityFilePattern 
+  foreach($VulnerableHash in $SearchedForVulnerabilityArray){
+    Write-Message "FileName and Location:$Tab$($VulnerableHash.FullName)$Tab-File HashValue:$Tab$($VulnerableHash.Hash)"
+  }
+  Write-Message ' '
+  Write-Message "#########################################################################"
+  Write-Message ' '
 
-# if we have found potential issues.  we can point at resources or even auto fix them, if there is a way.
-if ($SearchedForVulnerabilityArray.Count -gt 0){
-  Get-MitigationDetails $script:VulnerabilityName
+  # if we have found potential issues.  we can point at resources or even auto fix them, if there is a way.
+  if ($SearchedForVulnerabilityArray.Count -gt 0){
+    Get-MitigationDetails $script:VulnerabilityName
+  }
+
 }
 # .End of Script
 #endregion
